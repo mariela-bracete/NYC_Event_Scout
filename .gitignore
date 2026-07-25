@@ -10,3 +10,6 @@ venv/
 # Agent 2 writes event vectors here at query time (see app/agents/event_retriever.py).
 # The committed chroma/ store (seeded user_preferences) is separate and tracked.
 chroma_events/
+
+storage/event_cache_*
+storage/signals_*

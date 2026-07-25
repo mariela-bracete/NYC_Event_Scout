@@ -11,52 +11,69 @@
     <h1>NYC Event Scout</h1>
     <p class="subtitle">Tell us what you're into, and we'll find NYC orgs and events for you.</p>
 
-    <form id="profile-form">
-      <label for="raw-text">Describe your interests</label>
+    <section id="status" class="status" hidden></section>
+
+    <!-- Section 1: Agent 1 input -->
+    <section class="panel" id="interests-panel">
+      <h2>1. What are you into?</h2>
+      <div class="tiles" id="category-tiles">
+        <button type="button" class="tile" data-category="arts_culture" aria-pressed="true">🎭 Arts &amp; Culture</button>
+        <button type="button" class="tile" data-category="parks_outdoors" aria-pressed="true">🌳 Parks &amp; Outdoors</button>
+        <button type="button" class="tile" data-category="nightlife_bars" aria-pressed="false">🍸 Nightlife &amp; Bars</button>
+        <button type="button" class="tile" data-category="food_restaurants" aria-pressed="false">🍜 Food &amp; Restaurants</button>
+        <button type="button" class="tile" data-category="community_nonprofits" aria-pressed="false">🤝 Community &amp; Nonprofits</button>
+      </div>
+
+      <label for="raw-text">In your own words</label>
       <textarea
         id="raw-text"
-        name="raw_text"
         rows="3"
         placeholder="e.g. I love jazz but hate crowds, prefer free events outdoors"
       ></textarea>
 
-      <fieldset>
-        <legend>Categories</legend>
-        <label class="checkbox">
-          <input type="checkbox" name="category" value="arts_culture" />
-          Arts &amp; Culture
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" name="category" value="parks_outdoors" />
-          Parks &amp; Outdoors
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" name="category" value="nightlife_bars" />
-          Nightlife &amp; Bars
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" name="category" value="food_restaurants" />
-          Food &amp; Restaurants
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" name="category" value="community_nonprofits" />
-          Community &amp; Nonprofits
-        </label>
-      </fieldset>
+      <button type="button" id="find-orgs-btn">Find my organizations &rarr;</button>
+    </section>
 
-      <button type="submit" id="find-events-btn">Find Events</button>
-    </form>
+    <div class="divider"></div>
 
-    <section id="status" class="status" hidden></section>
+    <!-- Section 2: org roster, editable -->
+    <section class="panel" id="orgs-panel" hidden>
+      <h2>2. Your organizations</h2>
+      <p class="panel-hint">Toggle any off you're not interested in, or add your own.</p>
+      <div class="chips" id="org-chips"></div>
+      <form id="add-org-form" class="inline-form">
+        <input type="text" id="add-org-name" placeholder="Add an organization..." autocomplete="off" />
+        <select id="add-org-category">
+          <option value="arts_culture">Arts &amp; Culture</option>
+          <option value="parks_outdoors">Parks &amp; Outdoors</option>
+          <option value="nightlife_bars">Nightlife &amp; Bars</option>
+          <option value="food_restaurants">Food &amp; Restaurants</option>
+          <option value="community_nonprofits">Community &amp; Nonprofits</option>
+        </select>
+        <button type="submit">Add</button>
+      </form>
+    </section>
 
-    <section id="orgs-container" class="results" hidden>
-      <h2>Agent 1 found these orgs for you</h2>
-      <ul id="orgs-list"></ul>
+    <div class="divider" id="divider-2" hidden></div>
+
+    <!-- Section 3: search + results -->
+    <section class="panel" id="search-panel" hidden>
+      <h2>3. Find events</h2>
+      <div class="filters">
+        <label class="checkbox"><input type="checkbox" id="filter-free" /> Free only</label>
+        <label class="checkbox"><input type="checkbox" id="filter-weekend" /> This weekend only</label>
+      </div>
+      <button type="button" id="search-events-btn">Search events</button>
+    </section>
+
+    <section id="best-bets-container" class="results best-bets" hidden>
+      <h2>🌤️ Best bets this weekend</h2>
+      <ul id="best-bets-list" class="event-grid"></ul>
     </section>
 
     <section id="events-container" class="results" hidden>
-      <h2>Events</h2>
-      <ul id="events-list"></ul>
+      <h2>All events</h2>
+      <ul id="events-list" class="event-grid"></ul>
     </section>
   </main>
 
