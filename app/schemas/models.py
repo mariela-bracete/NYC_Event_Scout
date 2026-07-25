@@ -1,8 +1,12 @@
 """Pydantic schemas shared across all NYC Event Scout agents.
 
-Only two endpoints are live this phase (preference-profiler, event-retriever),
-but all four schemas are defined here now so the contract is locked for the
-whole team ahead of Agent 3 and the signals endpoint.
+All four endpoints (preference-profiler, event-retriever, curator-ranker,
+signals) are live as of this phase.
+
+Only one addition vs. the previously locked version: `CuratorRankerRequest`
+— a new request-body model, additive-only, following the exact same pattern
+as `PreferenceProfilerRequest` below. Nothing existing was renamed or
+restructured; every other class is untouched.
 """
 
 from __future__ import annotations
@@ -67,7 +71,7 @@ class RankedEvents(BaseModel):
     events: List[Event]
 
 
-# --- Agent 3 output: final feed (model only, no endpoint yet) ------------
+# --- Agent 3 output: final feed -------------------------------------------
 
 
 class FeedItem(BaseModel):
@@ -88,7 +92,7 @@ class FinalFeed(BaseModel):
     best_bets_this_weekend: List[str]
 
 
-# --- Accept/skip signals (model only, no endpoint yet) --------------------
+# --- Accept/skip signals ----------------------------------------------------
 
 
 class Signal(BaseModel):
@@ -108,3 +112,11 @@ class SignalBatch(BaseModel):
 class PreferenceProfilerRequest(BaseModel):
     raw_text: str = ""
     selected_categories: List[str] = Field(default_factory=list)
+
+
+class CuratorRankerRequest(BaseModel):
+    """Request body for POST /agents/curator-ranker — Agent 3's input is the
+    profile (for category weights + raw text) plus Agent 2's ranked events."""
+
+    profile: PreferenceProfile
+    ranked_events: RankedEvents
