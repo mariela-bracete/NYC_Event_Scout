@@ -120,3 +120,26 @@ class CuratorRankerRequest(BaseModel):
 
     profile: PreferenceProfile
     ranked_events: RankedEvents
+
+
+class SearchRequest(BaseModel):
+    """Request body for POST /search — the full pipeline (Agent 2 retrieval +
+    RAG ranking, then Agent 3 curation) in one call.
+
+    Send either an inline ``profile`` (the object POST /preferences returned)
+    or just a ``user_id`` whose profile was previously persisted by
+    POST /preferences. Inline profile wins when both are present."""
+
+    profile: Optional[PreferenceProfile] = None
+    user_id: Optional[str] = None
+
+
+class SimilarRequest(BaseModel):
+    """Request body for POST /similar — nearest events to one the user liked.
+
+    ``user_id`` is optional; when present, results are enriched with
+    title/org/type from that user's event metadata cache."""
+
+    event_id: str
+    user_id: Optional[str] = None
+    top_k: int = Field(default=5, ge=1, le=25)

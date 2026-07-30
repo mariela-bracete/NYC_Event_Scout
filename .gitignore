@@ -11,5 +11,14 @@ venv/
 # The committed chroma/ store (seeded user_preferences) is separate and tracked.
 chroma_events/
 
+# Agent 3's RL loop writes updated preference vectors here (see app/agents/rl_loop.py).
+chroma_user_prefs/
+
+# Generated per-user interaction data (not seed fixtures).
 storage/event_cache_*
 storage/signals_*
+storage/users/*_profile.json
+!storage/users/test_user_001_profile.json
+
+.DS_Store
+.hf-cache/

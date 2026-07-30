@@ -1,0 +1,34 @@
+# NYC Event Scout — one command: docker-compose up
+# App at http://localhost:8000 (frontend + API + /docs).
+#
+# Env vars are read from a .env file at the repo root if present (compose
+# does this automatically) — copy .env.example to .env and set HF_TOKEN.
+# Everything degrades gracefully without it (stub events, no LLM curation).
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_PROVIDER=${HF_PROVIDER:-publicai}
+      - HF_MODEL=${HF_MODEL:-swiss-ai/Apertus-70B-Instruct-2509}
+      - NWS_CONTACT_EMAIL=${NWS_CONTACT_EMAIL:-}
+      # Point Agent 2's user-vector reads at the store the RL loop writes to,
+      # falling back to the committed seed store on first run — this is what
+      # makes accept/skip feedback actually influence the next /search inside
+      # the container (see docs/agent3_integration_handoff.md #6).
+      - USER_PREF_CHROMA_PATH=${USER_PREF_CHROMA_PATH:-/app/chroma_user_prefs}
+    volumes:
+      # Flat JSON interaction data (signals, event caches, saved profiles)
+      # lives on the host so it survives rebuilds and is easy to inspect.
+      - ./storage:/app/storage
+      # Committed, read-only seed store (user_preferences vector fixture).
+      - ./chroma:/app/chroma
+      # Writable vector stores persist in named volumes across restarts.
+      - chroma_events:/app/chroma_events
+      - chroma_user_prefs:/app/chroma_user_prefs
+
+volumes:
+  chroma_events:
+  chroma_user_prefs:
