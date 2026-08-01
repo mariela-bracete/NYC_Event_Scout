@@ -158,7 +158,14 @@ docker-compose up
 
 That's the whole thing — first build takes a few minutes (CPU-only torch +
 the baked-in all-MiniLM-L6-v2 embedding model, so the first search doesn't
-stall on a download). Details of what compose wires up:
+stall on a download).
+
+Note: run this from a clone on a normal local disk. Cloud-synced folders
+(Google Drive, OneDrive, Dropbox) don't handle Docker bind mounts reliably.
+Verified firsthand: with the repo in a Google Drive folder, container writes
+to `storage/` never show up on the host.
+
+Details of what compose wires up:
 
 - **Flat JSON session data** (`storage/`: signals, event caches, saved
   profiles) is bind-mounted from the host — it survives rebuilds and you can
