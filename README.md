@@ -46,7 +46,7 @@ shared stores — a ChromaDB vector store and flat JSON session storage:
 | `POST /search` | Full pipeline: Agent 2 retrieval + RAG ranking → Agent 3 curation → `FinalFeed`. Body: inline `profile` or a `user_id` saved earlier |
 | `POST /similar` | Nearest events (cosine) to a given `event_id` from the shared events vector store |
 | `POST /feedback` | Accept/skip signals → logged to JSON + RL update of the preference embedding (alias: `POST /signals`) |
-| `GET /profile?user_id=` | Taste-profile data: category breakdown, interest graph, activity heatmap, taste-type label |
+| `GET /profile?user_id=` | Taste-profile data: category breakdown, interest graph, activity heatmap, taste-type label (backend data only; no frontend UI yet) |
 | `GET /weather` | NYC weekend forecast from the National Weather Service |
 | `GET /health` | Liveness check |
 | `POST /agents/*` | Per-agent seams (`preference-profiler`, `event-retriever`, `curator-ranker`) used for integration and by the current frontend |
@@ -91,9 +91,12 @@ This phase implements:
   accepted events / away from skipped ones (lightweight, RLHF-inspired — no RL
   framework). See `docs/agent3_integration_handoff.md` for the full detail,
   including two open coordination items with Agents 1 and 2.
-- A minimal vanilla HTML/CSS/JS frontend that drives Agents 1 and 2 in
-  sequence. It does **not** yet call `/agents/curator-ranker` or `/signals` —
-  wiring the final feed + accept/skip buttons into `app.js` is the next step.
+- A minimal vanilla HTML/CSS/JS frontend that drives the full agent chain:
+  profile build (Agent 1), event retrieval (Agent 2), curated feed (Agent 3),
+  and Save/Skip buttons wired to `/signals` so feedback feeds the RL loop.
+  The taste-profile endpoint (`GET /profile`) is backend-only for now; the
+  frontend does not render it, and per the project breakdown that UI is
+  optional / future state.
 
 ## Repo layout
 
