@@ -82,6 +82,11 @@ def preferences(request: PreferenceProfilerRequest) -> PreferenceProfile:
     """Agent 1, plus persistence: the returned profile is saved to flat JSON
     so /search and /profile can later work from just a user_id."""
     profile = build_preference_profile(request.raw_text, request.selected_categories)
+    # Stamp the team's embedding_id convention (pref_<user_id>) so Agent 2's
+    # hybrid vector lookup finds the RL-updated vector once feedback starts
+    # arriving; until then the id isn't in the store and Agent 2 gracefully
+    # embeds the profile seed instead.
+    profile.embedding_id = f"pref_{profile.user_id}"
     save_profile(profile)
     return profile
 

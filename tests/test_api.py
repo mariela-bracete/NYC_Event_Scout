@@ -77,10 +77,13 @@ def test_preferences_returns_and_persists_profile(tmp_path):
     assert response.status_code == 200
     assert response.json()["user_id"] == "user-1"
     build.assert_called_once_with("I love jazz", ["arts_culture"])
-    # Persisted in the locked schema, loadable for later /search-by-user_id.
+    # Persisted in the locked schema, loadable for later /search-by-user_id,
+    # stamped with the team's embedding_id convention so Agent 2 can find the
+    # RL-updated vector for this user later.
     with patch.object(storage, "STORAGE_DIR", tmp_path):
         stored = storage.load_profile("user-1")
     assert stored is not None and stored.raw_text == "I love jazz"
+    assert stored.embedding_id == "pref_user-1"
 
 
 # --- POST /search -----------------------------------------------------------
