@@ -64,7 +64,9 @@ def signals(batch: SignalBatch) -> dict:
     # Convention until Agent 1 persists a stable embedding_id per user (see
     # docs/agent3_integration_handoff.md): f"pref_{user_id}".
     embedding_id = f"pref_{batch.user_id}"
-    return apply_signal_batch(batch, embedding_id)
+    # A brand-new user has no stored vector yet; the RL loop can seed one from
+    # the profile persisted by POST /preferences, if there is one.
+    return apply_signal_batch(batch, embedding_id, profile=load_profile(batch.user_id))
 
 
 # --- Spec'd public API (proposal endpoint names) ---------------------------

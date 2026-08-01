@@ -139,6 +139,24 @@ def test_feedback_matches_signals_behavior():
     assert response.json() == result
     # Same embedding_id convention as POST /signals: f"pref_{user_id}".
     assert apply.call_args.args[1] == "pref_user-1"
+    # The stored profile (None here) is passed so the RL loop can seed a
+    # baseline vector for users who have no stored embedding yet.
+    assert "profile" in apply.call_args.kwargs
+
+
+def test_signals_seeds_rl_baseline_from_stored_profile(tmp_path):
+    batch = {
+        "user_id": "user-1",
+        "signals": [
+            {"event_id": "evt_1", "action": "accept", "timestamp": "2026-07-29T12:00:00Z"}
+        ],
+    }
+    with patch.object(storage, "STORAGE_DIR", tmp_path):
+        storage.save_profile(_profile())
+        with patch.object(main, "apply_signal_batch", return_value={}) as apply:
+            client.post("/signals", json=batch)
+
+    assert apply.call_args.kwargs["profile"].user_id == "user-1"
 
 
 # --- GET /profile -----------------------------------------------------------
