@@ -128,12 +128,14 @@ def _fallback_profile(
     if not categories:
         categories = [Category(name="community_nonprofits", weight=0.5)]
     seed = f"{raw_text} | " + ", ".join(c.name for c in categories)
+    # updated the following return code to fix embedding ID issue
     return PreferenceProfile(
         user_id=user_id,
         categories=categories,
         orgs=[],
         raw_text=raw_text,
         profile_embedding_seed=seed,
+        embedding_id=f"pref_{user_id}",
     )
 
 
@@ -296,13 +298,14 @@ def build_preference_profile(
         categories = _parse_categories(parsed, selected_categories)
         orgs = _parse_orgs(parsed, fallback_category=categories[0].name)
         seed = f"{raw_text} | " + ", ".join(c.name for c in categories)
-
+# updated return code to fix embedding id issue
         return PreferenceProfile(
             user_id=user_id,
             categories=categories,
             orgs=orgs,
             raw_text=raw_text,
             profile_embedding_seed=seed,
+            embedding_id=f"pref_{user_id}",
         )
 
     except Exception:
