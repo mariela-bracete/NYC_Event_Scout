@@ -1,0 +1,21 @@
+# Never bake secrets into the image.
+.env
+
+.git/
+.gitignore
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Prototype artifacts not wired into the app/ service.
+notebooks/
+
+# Generated at runtime; mounted as volumes in docker-compose.yml.
+chroma_events/
+chroma_user_prefs/
+storage/signals_*
+storage/event_cache_*

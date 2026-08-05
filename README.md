@@ -1,6 +1,57 @@
 # NYC Event Scout
 
-A multi-agent event discovery system for NYC. This phase implements:
+A multi-agent event discovery system for NYC.
+
+## Quick start
+
+```bash
+docker-compose up
+```
+
+Then open **http://localhost:8000** (interactive API docs at
+**http://localhost:8000/docs**). Optional but recommended: copy `.env.example`
+to `.env` and set `HF_TOKEN` first — without it the app still runs, but agents
+degrade to stub/fallback behavior instead of live LLM calls. See
+[Running with Docker](#running-with-docker) for details, or
+[Local setup](#local-setup) to run without Docker.
+
+## Architecture
+
+One FastAPI service (`app/main.py`) orchestrates three agents around two
+shared stores — a ChromaDB vector store and flat JSON session storage:
+
+```
+                        ┌─────────────────────────────────────────────┐
+ user (frontend)        │                 FastAPI (app/main.py)       │
+   │ POST /preferences → │ Agent 1: Preference Profiler               │
+   │                     │   free text + categories → profile + orgs  │──┐
+   │ POST /search      → │ Agent 2: Event Retriever + RAG             │  │ writes profile,
+   │                     │   web search per org → embed events →      │  │ reads/writes
+   │                     │   cosine-rank vs. user preference vector   │  │ vectors
+   │                     │ Agent 3: Curator & Ranker                  │  ▼
+   │                     │   LLM scoring + NWS weather → final feed   │ ChromaDB
+   │ POST /feedback    → │ RL loop: accept/skip nudges the user's     │ (user_preferences,
+   │                     │   preference vector toward/away from event │  events)
+   │ GET  /profile     → │ Taste profile: interest graph, category    │  +
+   │                     │   breakdown, heatmap from interaction data │ flat JSON
+   │ GET  /weather     → │ NWS weekend forecast (no key needed)       │ (storage/)
+                        └─────────────────────────────────────────────┘
+```
+
+### API endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `POST /preferences` | Agent 1: free text + categories → `PreferenceProfile` (persisted per user) |
+| `POST /search` | Full pipeline: Agent 2 retrieval + RAG ranking → Agent 3 curation → `FinalFeed`. Body: inline `profile` or a `user_id` saved earlier |
+| `POST /similar` | Nearest events (cosine) to a given `event_id` from the shared events vector store |
+| `POST /feedback` | Accept/skip signals → logged to JSON + RL update of the preference embedding (alias: `POST /signals`) |
+| `GET /profile?user_id=` | Taste-profile data: category breakdown, interest graph, activity heatmap, taste-type label (backend data only; no frontend UI yet) |
+| `GET /weather` | NYC weekend forecast from the National Weather Service |
+| `GET /health` | Liveness check |
+| `POST /agents/*` | Per-agent seams (`preference-profiler`, `event-retriever`, `curator-ranker`) used for integration and by the current frontend |
+
+This phase implements:
 
 - **Agent 1 — Preference Profiler** (`app/agents/preference_profiler.py`): real
   implementation, built on the approach already prototyped in
@@ -40,9 +91,12 @@ A multi-agent event discovery system for NYC. This phase implements:
   accepted events / away from skipped ones (lightweight, RLHF-inspired — no RL
   framework). See `docs/agent3_integration_handoff.md` for the full detail,
   including two open coordination items with Agents 1 and 2.
-- A minimal vanilla HTML/CSS/JS frontend that drives Agents 1 and 2 in
-  sequence. It does **not** yet call `/agents/curator-ranker` or `/signals` —
-  wiring the final feed + accept/skip buttons into `app.js` is the next step.
+- A minimal vanilla HTML/CSS/JS frontend that drives the full agent chain:
+  profile build (Agent 1), event retrieval (Agent 2), curated feed (Agent 3),
+  and Save/Skip buttons wired to `/signals` so feedback feeds the RL loop.
+  The taste-profile endpoint (`GET /profile`) is backend-only for now; the
+  frontend does not render it, and per the project breakdown that UI is
+  optional / future state.
 
 ## Repo layout
 
@@ -55,12 +109,16 @@ app/
 │   ├── live_events.py             # Agent 2 — live retrieval (search + HF extraction)
 │   ├── curator_ranker.py          # Agent 3 — scoring/filtering/reasons + best bets (+ stub fallback)
 │   ├── weather.py                 # Agent 3 — NWS weekend forecast (no key required)
-│   └── rl_loop.py                 # Agent 3 — accept/skip -> preference embedding update
+│   ├── rl_loop.py                 # Agent 3 — accept/skip -> preference embedding update
+│   └── taste_profile.py           # GET /profile — interest graph / breakdown / heatmap data
 ├── schemas/
 │   └── models.py                  # all shared pydantic schemas
-├── storage.py                     # Agent 3 — flat JSON signal log + event metadata cache
+├── storage.py                     # flat JSON: signal log, event metadata cache, saved profiles
+├── similar.py                     # POST /similar — nearest-neighbor lookup over event vectors
 └── mocks/
     └── mock_events.json           # stub-fallback events only (live path doesn't touch this)
+Dockerfile                         # single-container image (API + frontend)
+docker-compose.yml                 # one-command run: docker-compose up
 frontend/
 ├── index.html
 ├── style.css
@@ -93,6 +151,37 @@ instead (override via `USER_PREF_WRITE_CHROMA_PATH`) — see
 read path yet. `notebooks/`, `storage/*_profile.json`, and `agents/prompts/` remain
 earlier prototype artifacts not wired into the `app/` service; `storage/signals_*.json`
 and `storage/event_cache_*.json` are new, generated per-user by Agent 3 at runtime.
+
+## Running with Docker
+
+```bash
+cp .env.example .env    # then set HF_TOKEN=hf_...
+docker-compose up
+```
+
+That's the whole thing — first build takes a few minutes (CPU-only torch +
+the baked-in all-MiniLM-L6-v2 embedding model, so the first search doesn't
+stall on a download).
+
+Note: run this from a clone on a normal local disk. Cloud-synced folders
+(Google Drive, OneDrive, Dropbox) don't handle Docker bind mounts reliably.
+Verified firsthand: with the repo in a Google Drive folder, container writes
+to `storage/` never show up on the host.
+
+Details of what compose wires up:
+
+- **Flat JSON session data** (`storage/`: signals, event caches, saved
+  profiles) is bind-mounted from the host — it survives rebuilds and you can
+  inspect it directly.
+- **Vector stores**: the committed seed store `chroma/` is mounted read-only
+  in spirit (app code never writes to it); the writable `events` and
+  `user_preferences` stores live in named Docker volumes.
+- **Feedback loop is closed in Docker**: compose points
+  `USER_PREF_CHROMA_PATH` at the store the RL loop writes to
+  (`chroma_user_prefs`), so accept/skip signals sent to `POST /feedback`
+  influence the *next* `POST /search` — this resolves the open item in
+  `docs/agent3_integration_handoff.md` #6 for containerized runs (bare-metal
+  runs keep the old default unless you export the same env var).
 
 ## Local setup
 
@@ -141,8 +230,16 @@ pytest
 All Hugging Face, search, weather, and vector-store calls are mocked across the
 suite — nothing hits the network, a real API, or requires `chromadb` /
 `sentence-transformers` to actually be installed (Agent 3's tests use the same
-lazy-loader-plus-patch pattern `test_event_retriever.py` established). 52 tests
+lazy-loader-plus-patch pattern `test_event_retriever.py` established). 62 tests
 total:
+
+- `test_api.py` (10): the spec'd public routes — `/preferences` persists the
+  profile it returns; `/search` runs Agent 2 → Agent 3 from an inline profile
+  or a stored `user_id` (404 when neither exists); `/feedback` matches
+  `/signals` behavior incl. the `pref_<user_id>` embedding-id convention;
+  `/profile` returns taste data for a known user and an empty-but-valid shape
+  for an unknown one; `/similar` delegates correctly and degrades gracefully
+  with no vector store; `/weather` returns the forecast shape.
 
 - `test_preference_profiler.py` (4): profile matches schema shape and merges the
   model's categories/orgs; graceful fallback on an LLM exception, a search
@@ -224,13 +321,11 @@ consumers to identify themselves via a `User-Agent` header. Set
   only exercised by the one seeded `pref_test_user_001` profile, never a real
   live user. Agent 3 assumes the convention `embedding_id = f"pref_{user_id}"`
   until the team agrees on one and Agent 1 starts setting it.
-- **RL updates not yet visible to search**: Agent 3's RL loop writes updated
-  preference vectors to a separate, gitignored `chroma_user_prefs/` store
-  rather than the committed read-only `chroma/` — but Agent 2's
-  `_resolve_user_vector` still only reads from `USER_PREF_CHROMA_PATH`
-  (defaults to committed `chroma/`). Until a deployment points that env var at
-  the writable store (or the two are synced), accept/skip signals get logged
-  and the embedding gets updated, but future searches won't reflect it yet.
+- **RL updates not yet visible to search (bare-metal only)**: resolved in
+  Docker — `docker-compose.yml` points `USER_PREF_CHROMA_PATH` at the RL
+  loop's writable `chroma_user_prefs` store. Running bare-metal via uvicorn,
+  export the same env var to get the same behavior; the old default (read
+  the committed `chroma/`) still applies otherwise.
   See `docs/agent3_integration_handoff.md` #6.
 - **Frontend wiring for Agent 3**: `app.js` still only calls
   `/agents/preference-profiler` and `/agents/event-retriever` in sequence —
@@ -241,10 +336,8 @@ consumers to identify themselves via a `User-Agent` header. Set
   `Union[str, float]` with inconsistent formats (`"Free"`, `"$25"`, `"See
   website"`, numeric). Worth an explicit price-tier filter if the team wants a
   harder guarantee than "the LLM was told to consider it."
-- **`.gitignore` additions still needed**: `chroma_user_prefs/`,
-  `storage/signals_*.json`, `storage/event_cache_*.json` — these are Agent 3's
-  generated per-user data, not seed fixtures, and probably shouldn't be
-  committed (not added yet since Agent 3 doesn't own `.gitignore`).
+- ~~**`.gitignore` additions still needed**~~: done — `chroma_user_prefs/` and
+  generated `storage/` files are now ignored.
 
 ## Judgment calls made this phase
 

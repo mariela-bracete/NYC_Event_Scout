@@ -9,21 +9,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 from app.agents.curator_ranker import get_final_feed
 from app.agents.event_retriever import get_ranked_events
 from app.agents.preference_profiler import build_preference_profile
 from app.agents.rl_loop import apply_signal_batch
+from app.agents.taste_profile import build_taste_profile
+from app.agents.weather import get_weekend_forecast
 from app.schemas.models import (
     CuratorRankerRequest,
     FinalFeed,
     PreferenceProfile,
     PreferenceProfilerRequest,
     RankedEvents,
+    SearchRequest,
     SignalBatch,
+    SimilarRequest,
 )
+from app.similar import find_similar_events
+from app.storage import load_profile, save_profile
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,7 +64,75 @@ def signals(batch: SignalBatch) -> dict:
     # Convention until Agent 1 persists a stable embedding_id per user (see
     # docs/agent3_integration_handoff.md): f"pref_{user_id}".
     embedding_id = f"pref_{batch.user_id}"
-    return apply_signal_batch(batch, embedding_id)
+    # A brand-new user has no stored vector yet; the RL loop can seed one from
+    # the profile persisted by POST /preferences, if there is one.
+    return apply_signal_batch(batch, embedding_id, profile=load_profile(batch.user_id))
+
+
+# --- Spec'd public API (proposal endpoint names) ---------------------------
+#
+# The /agents/* routes above are the per-agent seams each owner integrates
+# against (and what the current frontend calls). The routes below are the
+# endpoint names promised in the proposal / project breakdown; they compose
+# the same agent functions rather than duplicating logic.
+
+
+@app.post("/preferences", response_model=PreferenceProfile)
+def preferences(request: PreferenceProfilerRequest) -> PreferenceProfile:
+    """Agent 1, plus persistence: the returned profile is saved to flat JSON
+    so /search and /profile can later work from just a user_id."""
+    profile = build_preference_profile(request.raw_text, request.selected_categories)
+    # Stamp the team's embedding_id convention (pref_<user_id>) so Agent 2's
+    # hybrid vector lookup finds the RL-updated vector once feedback starts
+    # arriving; until then the id isn't in the store and Agent 2 gracefully
+    # embeds the profile seed instead.
+    profile.embedding_id = f"pref_{profile.user_id}"
+    save_profile(profile)
+    return profile
+
+
+@app.post("/search", response_model=FinalFeed)
+def search(request: SearchRequest) -> FinalFeed:
+    """Full pipeline: Agent 2 (retrieval + RAG ranking) -> Agent 3 (curation,
+    weather-aware best bets) -> final ranked feed."""
+    profile = request.profile
+    if profile is None and request.user_id:
+        profile = load_profile(request.user_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No profile: send one inline or POST /preferences first for this user_id.",
+        )
+    ranked = get_ranked_events(profile)
+    return get_final_feed(ranked, profile)
+
+
+@app.post("/similar")
+def similar(request: SimilarRequest) -> dict:
+    """Nearest events (cosine) to one the user liked, from the shared events
+    vector store Agent 2 populates during /search."""
+    return find_similar_events(request.event_id, request.top_k, request.user_id)
+
+
+@app.post("/feedback")
+def feedback(batch: SignalBatch) -> dict:
+    """Proposal name for the accept/skip signal endpoint — same behavior as
+    POST /signals (which the RL loop integration already targets)."""
+    return signals(batch)
+
+
+@app.get("/profile")
+def profile(user_id: str) -> dict:
+    """Taste-profile data (category breakdown, interest graph, activity
+    heatmap, taste-type label) assembled from persisted interaction data."""
+    return build_taste_profile(user_id)
+
+
+@app.get("/weather")
+def weather() -> dict:
+    """NYC weekend forecast from the National Weather Service (no key needed) —
+    the same data Agent 3 folds into its ranking."""
+    return get_weekend_forecast()
 
 
 # Mounted last so it never shadows the explicit API routes above.

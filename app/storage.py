@@ -28,7 +28,9 @@ import logging
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from app.schemas.models import Event, Signal
+from typing import Optional
+
+from app.schemas.models import Event, PreferenceProfile, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,13 @@ STORAGE_DIR = REPO_ROOT / "storage"
 
 def _signals_path(user_id: str) -> Path:
     return STORAGE_DIR / f"signals_{user_id}.json"
+
+
+def _profile_path(user_id: str) -> Path:
+    # Same naming pattern as the committed storage/users/test_user_001_profile.json
+    # prototype fixture, but files written here use the locked PreferenceProfile
+    # schema from app/schemas/models.py, not the fixture's earlier prototype shape.
+    return STORAGE_DIR / "users" / f"{user_id}_profile.json"
 
 
 def _event_cache_path(user_id: str) -> Path:
@@ -94,3 +103,28 @@ def save_event_cache_entries(user_id: str, events: Iterable[Event]) -> None:
 
 def load_event_cache(user_id: str) -> Dict[str, dict]:
     return _read_json(_event_cache_path(user_id), {})
+
+
+def save_profile(profile: PreferenceProfile) -> None:
+    """Persist a user's PreferenceProfile (locked schema) to flat JSON so a
+    later session can search or build a taste profile without re-running
+    Agent 1. Called by POST /preferences."""
+    path = _profile_path(profile.user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(profile.model_dump(), f, indent=2)
+
+
+def load_profile(user_id: str) -> Optional[PreferenceProfile]:
+    """Load a persisted PreferenceProfile, or None if absent/unparseable.
+    Files in the earlier prototype shape (e.g. the committed
+    test_user_001_profile.json fixture) don't validate against the locked
+    schema and are treated as absent rather than raising."""
+    data = _read_json(_profile_path(user_id), None)
+    if not data:
+        return None
+    try:
+        return PreferenceProfile(**data)
+    except Exception:
+        logger.warning("stored profile for %s doesn't match locked schema; ignoring", user_id)
+        return None
