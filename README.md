@@ -60,7 +60,10 @@ This phase implements:
   then calls that same Hugging Face-hosted LLM to turn a user's free text +
   selected interest categories into normalized category weights and a seeded list
   of real NYC organizations grounded in those search results, adapted to the
-  locked `PreferenceProfile` schema below.
+  locked `PreferenceProfile` schema below. Every profile it returns — success or
+  fallback path — is stamped with `embedding_id = f"pref_{user_id}"`
+  (`preference_profiler.py:138,308`), the convention Agent 2's hybrid vector
+  lookup and Agent 3's RL loop both assume.
 - **Agent 2 — Event Retriever** (`app/agents/event_retriever.py` +
   `app/agents/live_events.py`): **real, live**. For each org in the user's
   `PreferenceProfile` (or each selected category if Agent 1 fell back to no orgs),
@@ -70,9 +73,11 @@ This phase implements:
   `event_retriever.py` then embeds each event on `title + description + type + org`
   with `sentence-transformers/all-MiniLM-L6-v2` (384-dim) into the ChromaDB
   `events` collection, resolves the user's preference vector **hybrid**-style —
-  the stored `user_preferences` vector when `PreferenceProfile.embedding_id` is
-  set and found, otherwise an on-the-fly embedding of `profile_embedding_seed` —
-  and returns `Event`s sorted by cosine `similarity_score`. If live retrieval
+  the stored `user_preferences` vector when the profile's `embedding_id`
+  (always stamped by Agent 1, see above) resolves in whichever ChromaDB store
+  `USER_PREF_CHROMA_PATH` points at, otherwise an on-the-fly embedding of
+  `profile_embedding_seed` — and returns `Event`s sorted by cosine
+  `similarity_score`. If live retrieval
   fails (no token, nothing found, malformed event), or `chromadb` /
   `sentence-transformers` aren't installed, or the vector path fails, it degrades
   gracefully to the `app/mocks/mock_events.json` stub (`get_stub_events`).
@@ -125,6 +130,7 @@ frontend/
 └── app.js
 tests/
 ├── test_health.py
+├── test_api.py                    # spec'd public routes (/preferences, /search, /similar, /feedback, /profile, /weather)
 ├── test_preference_profiler.py
 ├── test_event_retriever.py
 ├── test_live_events.py
@@ -198,18 +204,32 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
-Then open **http://localhost:8000** — type some interests, check a few categories,
-and click "Find Events". You should see a real Agent-1-generated org list (drawn
-from a live web search, not invented), followed by real, live events for those
-orgs (also grounded in search results, not invented) ranked by similarity to your
-profile. The live event pipeline runs one search + one HF call per org, so expect
-this step to take significantly longer than Agent 1 — tens of seconds for a
-profile with several orgs.
+Then open **http://localhost:8000** and work through the three sections on the
+page:
+
+1. **"1. What are you into?"** — pick categories (tiles) and/or describe
+   yourself in the text box, then **"Find my organizations →"**. This calls
+   Agent 1 live; you should see a real, grounded org list (drawn from a live
+   web search, not invented) appear as toggleable chips in section 2 — untoggle
+   any you don't want, or add your own.
+2. **"3. Find events"** — optionally check "Free only" / "This weekend only",
+   then **"Search events"**. This chains Agent 2 (live per-org search +
+   embedding + cosine ranking) into Agent 3 (LLM scoring + NWS weather +
+   best-bets shortlist) and renders **"Best bets this weekend"** plus the full
+   ranked feed, each card grounded in real search results, not invented. This
+   step does one live search + one HF call per org (Agent 2) plus one more HF
+   call for the whole batch (Agent 3), so expect it to take noticeably longer
+   than step 1 — tens of seconds to over a minute for a profile with several
+   orgs.
+3. Each event card has **Save/Skip** buttons — these call `POST /signals`,
+   which logs the signal and nudges your stored preference vector (see
+   "What's next" for the bare-metal vs. Docker caveat on whether that update
+   is actually visible to your *next* search).
 
 `GET http://localhost:8000/health` should return `{"status": "ok"}`.
 
-The frontend doesn't call Agent 3 yet (see above), but both new endpoints work
-directly:
+To exercise `/agents/curator-ranker` or `/signals` directly (e.g. for API
+testing without the UI):
 
 ```bash
 curl -X POST http://localhost:8000/agents/curator-ranker \
@@ -230,10 +250,10 @@ pytest
 All Hugging Face, search, weather, and vector-store calls are mocked across the
 suite — nothing hits the network, a real API, or requires `chromadb` /
 `sentence-transformers` to actually be installed (Agent 3's tests use the same
-lazy-loader-plus-patch pattern `test_event_retriever.py` established). 62 tests
+lazy-loader-plus-patch pattern `test_event_retriever.py` established). 63 tests
 total:
 
-- `test_api.py` (10): the spec'd public routes — `/preferences` persists the
+- `test_api.py` (11): the spec'd public routes — `/preferences` persists the
   profile it returns; `/search` runs Agent 2 → Agent 3 from an inline profile
   or a stored `user_id` (404 when neither exists); `/feedback` matches
   `/signals` behavior incl. the `pref_<user_id>` embedding-id convention;
@@ -268,11 +288,27 @@ total:
   upsert-by-id, missing-file and corrupted-file handling.
 - `test_health.py` (1).
 
-Note: two of the existing `test_live_events.py` tests only pass with an
-`HF_TOKEN` present in the environment (even a dummy one) — see
-`docs/agent3_integration_handoff.md` #9 for detail. All new Agent 3 tests avoid
-this by passing `hf_token=` explicitly rather than relying on the ambient
-environment.
+**Currently no single environment gets all 63 passing** — two tests make
+opposite assumptions about ambient `HF_TOKEN`, verified by literally moving
+`.env` aside and re-running:
+
+- With a real `HF_TOKEN` in `.env` (the common case — `app.main`'s
+  `load_dotenv()` loads it process-wide the moment anything imports it, e.g.
+  via `test_health.py`/`test_api.py`): **62/63 pass.**
+  `test_curator_ranker.py::test_falls_back_when_no_hf_token` fails — it
+  doesn't isolate `os.environ`, so the ambient real token makes it skip the
+  no-token fallback path it's testing and hit the real API instead.
+- With no `.env` file at all: **61/63 pass.** The two
+  `test_live_events.py` tests documented in
+  `docs/agent3_integration_handoff.md` #9 fail instead — they short-circuit
+  on `fetch_live_events`'s own token check before their mocks are ever
+  exercised.
+
+Both are the same underlying issue (tests relying on ambient `os.environ`
+instead of isolating it) pulling in opposite directions. Fix: have all three
+tests either receive `hf_token=` explicitly (the pattern
+`test_preference_profiler.py`'s equivalent tests already use) or wrap in
+`@patch.dict(os.environ, ..., clear=True)`.
 
 ## Where the API key goes
 
@@ -315,27 +351,42 @@ consumers to identify themselves via a `User-Agent` header. Set
   not to, which can break the regex-based parser. Same underlying pattern is used
   in `live_events.py`'s extraction, so it's worth hardening both at once (e.g.
   strip fences explicitly before parsing) rather than just retrying.
-- **Persisting `embedding_id`**: Agent 1 still doesn't write to the
-  `user_preferences` ChromaDB collection or set `PreferenceProfile.embedding_id`,
-  so the hybrid "stored vector" path in Agent 2 (and now Agent 3's RL loop) is
-  only exercised by the one seeded `pref_test_user_001` profile, never a real
-  live user. Agent 3 assumes the convention `embedding_id = f"pref_{user_id}"`
-  until the team agrees on one and Agent 1 starts setting it.
-- **RL updates not yet visible to search (bare-metal only)**: resolved in
-  Docker — `docker-compose.yml` points `USER_PREF_CHROMA_PATH` at the RL
-  loop's writable `chroma_user_prefs` store. Running bare-metal via uvicorn,
-  export the same env var to get the same behavior; the old default (read
-  the committed `chroma/`) still applies otherwise.
-  See `docs/agent3_integration_handoff.md` #6.
-- **Frontend wiring for Agent 3**: `app.js` still only calls
-  `/agents/preference-profiler` and `/agents/event-retriever` in sequence —
-  `/agents/curator-ranker` and `/signals` (accept/skip buttons) aren't wired
-  into the UI yet.
+- ~~**Persisting `embedding_id`**~~: done — Agent 1 stamps
+  `embedding_id = f"pref_{user_id}"` on every profile it returns
+  (`preference_profiler.py:138,308`, merged via `fix/agent1-embedding-id`,
+  PR #4). What's left is deployment wiring, not Agent 1 code: **RL updates
+  are visible to search in Docker** — `docker-compose.yml` points
+  `USER_PREF_CHROMA_PATH` at the RL loop's writable `chroma_user_prefs`
+  store, so accept/skip signals actually change the next search's ranking.
+  Running bare-metal via uvicorn, export the same env var yourself; the old
+  default (read-only committed `chroma/`, which the RL loop never writes to)
+  still applies otherwise, so bare-metal runs won't see the loop's effect
+  without it. See `docs/agent3_integration_handoff.md` #6.
+- ~~**Frontend wiring for Agent 3**~~: done — `app.js` calls
+  `/agents/curator-ranker` then renders `best_bets_this_weekend` +
+  the full feed, and Save/Skip buttons call `POST /signals`.
+- **Frontend: sections 2 and 3 render un-hidden on first load.**
+  `frontend/index.html` marks `#orgs-panel` and `#search-panel` `hidden`, but
+  `frontend/style.css`'s `.panel { display: flex; ... }` rule unconditionally
+  overrides the browser's built-in `[hidden] { display: none }` — author-origin
+  `display` declarations beat user-agent-origin ones regardless of specificity.
+  Every other conditionally-shown element (`.status`, `.divider`, `.results`)
+  hides correctly because nothing in their class sets a competing `display`.
+  Verified directly via `getComputedStyle`: `#orgs-panel`/`#search-panel` both
+  have `hidden` in the DOM but compute to `display: flex`. Net effect: the
+  intended 3-step reveal doesn't happen — the whole form (including an empty
+  "Add an organization" section and a not-yet-usable "Search events" button)
+  is visible before the user has typed anything. One-line fix:
+  `.panel[hidden] { display: none }`.
 - **Price as a hard filter**: Agent 3's prompt asks the model to weigh price
   holistically rather than hard-filtering on it in code, since `price` is
   `Union[str, float]` with inconsistent formats (`"Free"`, `"$25"`, `"See
   website"`, numeric). Worth an explicit price-tier filter if the team wants a
   harder guarantee than "the LLM was told to consider it."
+- **Test suite env-isolation gap**: see "Running tests" above —
+  `test_curator_ranker.py::test_falls_back_when_no_hf_token` and two
+  `test_live_events.py` tests make opposite assumptions about ambient
+  `HF_TOKEN`, so no single environment currently gets all 63 tests green.
 - ~~**`.gitignore` additions still needed**~~: done — `chroma_user_prefs/` and
   generated `storage/` files are now ignored.
 
@@ -420,3 +471,181 @@ consumers to identify themselves via a `User-Agent` header. Set
   updates go to a new `chroma_user_prefs/` store. On a user's first-ever
   update it seeds from the read-only store if something's there, or embeds
   the profile's seed text if nothing exists anywhere yet.
+
+### Frontend redesign (civic/institutional theme)
+
+- **`--error` adjusted from the spec'd `#C43D3D` to `#B23A3A`**: the original
+  measures 4.28:1 against `--bg`, under the 4.5:1 AA minimum for normal text
+  (`.status.error` renders directly on `--bg`, not on a white `.panel`
+  surface). The adjusted value measures ~5.0:1. Same hue family, just darker.
+- **`--ink` text on filled tiles, not the spec'd white/light text**: white on
+  `--accent` measures ~2.25:1 and white on `--accent-warm` measures ~3.34:1 —
+  both fail 4.5:1 badly. `--ink` on `--accent` measures ~6.7:1 (comfortable);
+  `--ink` on `--accent-warm` measures ~4.50:1 — technically passing but right
+  at the boundary, worth re-checking with a real contrast tool (axe,
+  Lighthouse) rather than trusting this arithmetic alone if it matters for a
+  grade/demo. Kept the exact specified hex values rather than darkening
+  `--accent-warm` further, since 4.50 ≥ 4.5 and the brief said to stay as
+  close to the intended hues as possible.
+- **Primary buttons (`#find-orgs-btn`, `#search-events-btn`) use
+  `--accent-bronze` fill with white text (~4.9:1), not gold or coral**: the
+  brief didn't specify button colors explicitly. Using `--accent-bronze`
+  sidesteps the gold/coral contrast problem entirely for the two
+  highest-traffic controls, and keeps gold/coral reserved for category
+  identity rather than diluting them into a third "button color" role.
+- **Focus-visible outlines use `--ink`, not `--accent`**: `--accent` (gold)
+  measures ~2.25:1 against both `--bg` and `--surface`, under the 3:1
+  UI-component minimum WCAG 2.4.11 requires for focus indicators. `--ink`
+  passes at ~12–15:1 against both.
+- **Fieldset `<legend>`s are visually hidden (`.sr-only`), not shown**: each
+  panel already has a visible `<h2>` stating the same context ("1. What are
+  you into?" / "2. Your organizations") — showing both a heading and a
+  legend with near-identical text felt redundant for sighted users. Present
+  in the DOM either way, so screen reader users still get the grouping
+  context; this is a visual-only call.
+- **Org chips don't get per-category accent coloring** — only category tiles
+  and (via a uniform bronze edge, see below) event cards do. The brief's
+  category-accent mapping was scoped to tiles and event cards specifically;
+  chips have their own explicit "dashed outline, provisional" spec, and
+  adding a third coloring dimension on top of that would work against the
+  "visually distinct from solid tiles" goal.
+- **Two spec items previously flagged as out-of-scope have since been fixed
+  end to end (schema, backend, and frontend)** — originally documented here
+  as gaps rather than faked; now resolved:
+  - *Category-colored left border on event cards.* `FeedItem` in
+    `app/schemas/models.py` now carries a `category: str` field.
+    `curator_ranker.py` resolves it per event by joining the event's
+    `org_id` against the `PreferenceProfile.orgs` list that produced it
+    (`_org_category_lookup` / `_event_category`) — `Event` itself has no
+    reliable category field (`Event.type` is only a real category slug for
+    live-search-sourced events, not `mock_events.json` stub data, so it's
+    deliberately not used as an intermediate fallback). When `org_id` can't
+    be matched against the profile's orgs — expected for stub/mock data,
+    not live events — it falls back to `FALLBACK_CATEGORY =
+    "community_nonprofits"` (matching `preference_profiler.py`'s own
+    default-profile category, for consistency rather than inventing a
+    second constant). `app.js`'s `buildEventCard` sets
+    `li.dataset.category = item.category`, and `style.css` keys
+    `.event-card[data-category="..."]` off it using the same mapping as the
+    category tiles: arts/parks/community → `--accent`, nightlife/food →
+    `--accent-warm`.
+  - *IBM Plex Mono specifically on dates and prices.* `buildEventCard` now
+    wraps the date and price in `<span class="meta-mono">`, with location
+    left as a plain `<span>` in between — `.event-meta .meta-mono` in
+    `style.css` applies `--font-mono` to just those two spans; the blanket
+    `font-family: var(--font-mono)` on the whole `.event-meta` line was
+    removed.
+- **Spacing-scale mapping isn't a 1:1 preservation of every old pixel
+  value** — the whole point of consolidating ~15 ad hoc values into the
+  6-step scale was to stop having ad hoc values; each old value was mapped
+  to its nearest scale step (e.g. old `0.6rem` input padding → `--space-3`
+  `0.75rem`, not preserved exactly), not preserved byte-for-byte.
+- **One responsive breakpoint (`480px`)**, not several: rather than
+  overriding dozens of individual rules per breakpoint, the media query
+  redefines the type/spacing *tokens* themselves inside `:root`, which
+  cascades everywhere that already references them. The earlier UI audit
+  confirmed flex-wrap alone doesn't overlap/overflow at 375px, just uses
+  more vertical space — a single tightening pass was enough; more
+  breakpoints would have been complexity without a problem to solve.
+
+### Five-screen no-scroll shell + light/dark theme
+
+The single-scroll-page layout from the previous redesign was restructured into
+five discrete screens (Landing, Step 1 Interests, Step 2 Organizations, Step 3
+Filters, Results), each a `.screen.visible { display: flex }` /
+`.screen { display: none }` pane switched by `showScreen()` in `app.js` — the
+same `[hidden]`-shadowing bug class fixed for `.panel` previously is avoided
+here by construction (the app never puts a conflicting unconditional
+`display` rule on anything gated by the native `hidden` attribute; `#status`
+in particular deliberately has no `display` override so `[hidden]` still
+works on it untouched).
+
+- **Agent 3's endpoint already existed.** `POST /agents/curator-ranker` →
+  `get_final_feed` was already live in `app/main.py`, and `app.js` was
+  already calling all three agent endpoints in sequence before this pass.
+  No new backend route was added — this phase is a frontend restructure
+  only; `app/` has zero diff from this task.
+- **A "Continue to filters" button (`#orgs-continue-btn`) was added to
+  Step 2** — it didn't exist before because the old layout revealed the org
+  panel and the filter panel together in one scroll, with no boundary
+  between them. Splitting them into separate screens per the brief requires
+  an explicit transition; this button is new UI, not a restyle of
+  something that existed.
+- **The old `.divider`/`.divider-2` elements were dropped**, not restyled —
+  they only made sense as visual separators between vertically-stacked
+  panels in a single scrolling page. Five fully separate screens have no
+  equivalent seam to divide.
+- **`--error` and `--success` needed dark-mode-specific overrides that
+  weren't in the spec'd token block.** The spec's `html[data-theme="dark"]`
+  block only redefines `--bg/--surface/--ink/--ink-muted/--border/--accent/
+  --accent-warm/--accent-bronze/--accent-fill/--accent-warm-fill/
+  --on-accent-fill/--on-accent-warm-fill`; left alone, `--error`/`--success`
+  would inherit their light-mode hex values, which measure ~2.8–3.1:1
+  against the dark bg/surface (fails 4.5:1 normal-text AA — these render as
+  small text on `.thumb` hover states and `.signal-note`). Brightened to
+  `#E37B7B` / `#5FBE8D` for dark mode only (6–8:1), to avoid regressing an
+  already-fixed accessibility property per "carry forward, don't regress."
+- **`--error` in light mode stays at the previously-corrected `#B23A3A`**,
+  not the spec's literal `#C43D3D` (4.28:1 on `--bg`, fails AA) — same
+  reasoning: don't re-introduce a contrast failure that was already fixed
+  in an earlier pass.
+- **Contrast confirmed (see numbers below): `--ink-muted` passes AA
+  everywhere in both themes; `--accent`/`--accent-warm` only pass as *text*
+  in dark mode — in light mode they remain fill/border/icon-only tokens**,
+  consistent with the existing `/* fills only */` comments in the token
+  block. Computed via the standard WCAG relative-luminance formula:
+
+  | token vs. background | light | dark |
+  |---|---|---|
+  | `--ink-muted` vs `--bg` | 4.93:1 ✅ | 6.79:1 ✅ |
+  | `--ink-muted` vs `--surface` | 5.92:1 ✅ | 6.20:1 ✅ |
+  | `--accent` vs `--bg` | 1.87:1 ❌ | 9.44:1 ✅ |
+  | `--accent` vs `--surface` | 2.25:1 ❌ | 8.62:1 ✅ |
+  | `--accent-warm` vs `--bg` | 2.78:1 ❌ | 6.65:1 ✅ |
+  | `--accent-warm` vs `--surface` | 3.34:1 ⚠️ (3:1 large-text/UI only) | 6.07:1 ✅ |
+
+  Practical effect: `.text-fill-warm` (the gradient/flat headline word) is
+  large text (`--text-2xl`, well over the 18.66px/24px AA large-text
+  threshold), so it only needs 3:1 — which light mode clears *on `--surface`
+  (3.34:1) but not on `--bg` (2.78:1)*. The `.rail` (where the headline
+  lives) is given `background: var(--surface)`, not `--bg`, specifically so
+  this passes; putting the hero directly on the page background would have
+  failed AA in light mode.
+- **`.rail` does not get its own `overflow-y: auto` fallback.** An earlier
+  draft of the responsive pass added this defensively for very short
+  viewports, but it silently created a second scrolling region, violating
+  the "the ONLY place scrolling happens is `.scroll-region`" rule, *and*
+  still left the landing screen's CTA button unreachable at 375×500 (a
+  `max-height: 40vh` cap clipped it with no visible way to scroll there).
+  Fixed properly instead: the rail's `max-height` cap was removed entirely,
+  the decorative `.pipeline-preview` (already `aria-hidden`) is hidden under
+  `@media (max-height: 640px)`, `.dek` is hidden under `@media
+  (max-height: 460px)`, and the landing `.main`'s category-preview grid was
+  wrapped in a real `.scroll-region` so if anything still doesn't fit, the
+  one legitimate scrolling place absorbs it. Verified at 1440×900, 1280×620,
+  820×700, 375×700, and 375×500 — `document.body.scrollHeight ===
+  document.body.clientHeight` at every size (no page-level scroll), and the
+  landing CTA is focusable/clickable at all of them.
+- **Step nav / agent status "done" state uses a checkmark glyph via CSS
+  `content: "\2713"`**, not just a border/background color change, so the
+  done/active/upcoming distinction doesn't rely on color alone (WCAG 1.4.1),
+  matching the existing chip/tile pattern.
+- **The live agent-status pulse respects `prefers-reduced-motion`**: the
+  `agent-pulse` keyframe animation is scoped inside `@media
+  (prefers-reduced-motion: no-preference)`; users who've asked for reduced
+  motion still see the "active" state via the solid accent-fill dot color
+  change, just without the pulsing animation.
+- **Results screen shows live, not faked, agent status.** Rather than
+  waiting for the full Agent 2 → Agent 3 response before switching to the
+  Results screen, `showScreen('results')` fires immediately when "Search
+  events" is clicked, with Profiler marked done (it already ran in Step 1),
+  Retriever marked active, and Curator pending — then each `data-state`
+  flips to `done`/`active` as each real fetch actually resolves. This is
+  what the brief's "don't fake an active state after data is already back"
+  phrasing implied was the intent, even though a simpler (but less honest)
+  implementation could have just shown all-done after the fact.
+- **Category icons on event-card badges are duplicated markup, not shared
+  DOM/JS with the Step 1 tiles** — `CATEGORY_ICON_SVG` in `app.js` holds
+  the same path data as the tile SVGs in `index.html`, kept in sync by
+  hand. A shared icon-sprite/template approach was possible but was more
+  machinery than this app's five fixed categories justify.

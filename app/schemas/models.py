@@ -83,6 +83,14 @@ class FeedItem(BaseModel):
     link: str
     final_score: float
     reason: str
+    # One of the 5 category slugs (arts_culture, parks_outdoors, nightlife_bars,
+    # food_restaurants, community_nonprofits) — resolved in curator_ranker.py by
+    # joining the event's org_id back against the PreferenceProfile.orgs list
+    # that produced it (Event itself carries no reliable category field; see
+    # curator_ranker.py's _event_category for why). Falls back to
+    # "community_nonprofits" when org_id can't be matched (e.g. the
+    # mock_events.json stub, whose org_ids never appear in a real profile).
+    category: str
 
 
 class FinalFeed(BaseModel):

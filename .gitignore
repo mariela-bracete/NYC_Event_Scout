@@ -22,3 +22,4 @@ storage/users/*_profile.json
 
 .DS_Store
 .hf-cache/
+ui-audit/

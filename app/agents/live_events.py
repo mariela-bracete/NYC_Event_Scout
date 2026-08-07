@@ -78,6 +78,12 @@ must have exactly this shape:
 """
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
+# Despite "respond with ONLY JSON, no commentary", the model sometimes adds
+# inline "// explanation" comments or a trailing comma before a closing
+# brace/bracket — both invalid JSON. Negative lookbehind on ":" keeps this
+# from mangling "http://"/"https://" URLs in event links.
+_JS_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
 
 def _extract_json_array(text: str) -> list:
@@ -89,7 +95,13 @@ def _extract_json_array(text: str) -> list:
     match = _JSON_ARRAY_RE.search(text)
     if not match:
         raise ValueError("no JSON array found in model response")
-    return json.loads(match.group(0))
+    candidate = match.group(0)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    cleaned = _TRAILING_COMMA_RE.sub(r"\1", _JS_COMMENT_RE.sub("", candidate))
+    return json.loads(cleaned)
 
 
 def _search_target_events(query: str, max_results: int = RESULTS_PER_TARGET) -> List[Dict[str, str]]:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import app.agents.curator_ranker as cr
-from app.schemas.models import Category, Event, FinalFeed, PreferenceProfile, RankedEvents
+from app.schemas.models import Category, Event, FinalFeed, Org, PreferenceProfile, RankedEvents
 
 
 def _fake_completion(text: str) -> SimpleNamespace:
@@ -47,7 +47,7 @@ def _profile(**overrides) -> PreferenceProfile:
     base = dict(
         user_id="user-xyz",
         categories=[Category(name="nightlife_bars", weight=0.9)],
-        orgs=[],
+        orgs=[Org(org_id="org_1", name="The Village Vanguard", category="nightlife_bars", source="seeded")],
         raw_text="I love jazz but hate crowds",
         profile_embedding_seed="I love jazz but hate crowds | nightlife_bars",
     )
@@ -95,6 +95,7 @@ def test_scores_and_ranks_events_via_llm(mock_inference_cls, mock_cache):
     assert result.feed[0].event_id == "evt_1"
     assert result.feed[0].final_score == 0.95
     assert "jazz" in result.feed[0].reason.lower()
+    assert result.feed[0].category == "nightlife_bars"  # joined via org_1 -> profile.orgs
     assert result.best_bets_this_weekend == ["evt_1"]
     mock_cache.assert_called_once()
 
@@ -136,6 +137,21 @@ def test_falls_back_when_no_hf_token(mock_cache):
     assert len(result.feed) == 1
     assert result.feed[0].final_score == 0.8  # falls back to similarity_score
     assert "unavailable" in result.feed[0].reason.lower()
+    assert result.feed[0].category == "nightlife_bars"  # category join happens on both paths
+
+
+@patch("app.agents.curator_ranker._cache_event_metadata")
+def test_unmatched_org_id_falls_back_to_default_category(mock_cache):
+    """An event whose org_id isn't in the profile's orgs list (e.g. mock_events.json
+    stub data) gets FALLBACK_CATEGORY rather than crashing or leaving category blank."""
+    result = cr.get_final_feed(
+        _ranked_events(events=[_event(org_id="org_unknown")]),
+        _profile(),
+        hf_token=None,
+        weather=_WEEKEND_WEATHER,
+    )
+
+    assert result.feed[0].category == cr.FALLBACK_CATEGORY
 
 
 @patch("app.agents.curator_ranker._cache_event_metadata")
