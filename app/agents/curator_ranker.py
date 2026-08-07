@@ -37,6 +37,14 @@ DEFAULT_HF_MODEL = "swiss-ai/Apertus-70B-Instruct-2509"
 
 BEST_BETS_LIMIT = 3
 
+# Matches preference_profiler.py's own fallback-profile default — reused here
+# for consistency rather than inventing a second "default category" constant.
+# Triggers when an event's org_id can't be matched against profile.orgs, which
+# in practice means mock_events.json's stub events (their org_ids, e.g.
+# "org_moma", never appear in a real PreferenceProfile) rather than live
+# events, whose org_id is the same org list Agent 2 searched from.
+FALLBACK_CATEGORY = "community_nonprofits"
+
 SYSTEM_PROMPT = """You are the Curator & Ranker for NYC Event Scout — the final step before a \
 user sees their event feed.
 
@@ -71,6 +79,12 @@ Never invent an event_id that wasn't given to you in the candidate list.
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _DATE_PREFIX_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+# Despite "respond with ONLY JSON, no commentary", the model sometimes adds
+# inline "// explanation" comments or a trailing comma before a closing
+# brace/bracket — both invalid JSON. Negative lookbehind on ":" keeps this
+# from mangling "http://"/"https://" URLs in event links.
+_JS_COMMENT_RE = re.compile(r"(?<!:)//[^\n]*")
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
 
 
 # --- lazy loader (patched in tests; keeps the weather HTTP call out of import) -
@@ -121,7 +135,13 @@ def _extract_json_object(text: str) -> dict:
     match = _JSON_OBJECT_RE.search(text)
     if not match:
         raise ValueError("no JSON object found in model response")
-    return json.loads(match.group(0))
+    candidate = match.group(0)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    cleaned = _TRAILING_COMMA_RE.sub(r"\1", _JS_COMMENT_RE.sub("", candidate))
+    return json.loads(cleaned)
 
 
 def _collect_completion_text(completion: Any) -> str:
@@ -163,7 +183,29 @@ def _weekend_date_strings(weather: dict) -> set:
     return {p.get("date") for p in weather.get("periods", []) if p.get("date")} if weather else set()
 
 
-def _build_feed_items(parsed: dict, ranked_events: RankedEvents) -> List[FeedItem]:
+def _org_category_lookup(profile: PreferenceProfile) -> dict:
+    """org_id -> category, built from the profile's own org list."""
+    return {org.org_id: org.category for org in profile.orgs}
+
+
+def _event_category(event: Event, org_category_by_id: dict) -> str:
+    """Resolve one event's category by joining its org_id against the
+    profile's org list (built once by the caller via _org_category_lookup).
+
+    Event itself carries no reliably-a-category-slug field to fall back to
+    first: Event.type only holds a real category slug for live-search-sourced
+    events (live_events.py sets it from org.category) — for mock_events.json's
+    stub fallback it's a freeform event-type string ("exhibition", "concert",
+    "outdoors", ...), not one of the five category slugs, so using it as an
+    intermediate fallback would silently produce an invalid category on stub
+    data. Falls straight to FALLBACK_CATEGORY when org_id isn't found.
+    """
+    return org_category_by_id.get(event.org_id, FALLBACK_CATEGORY)
+
+
+def _build_feed_items(
+    parsed: dict, ranked_events: RankedEvents, org_category_by_id: dict
+) -> List[FeedItem]:
     """Grounding: only event_ids that were actually in the input survive — an
     id the model invented is silently dropped, same philosophy as Agents 1/2's
     link/name grounding checks."""
@@ -191,6 +233,7 @@ def _build_feed_items(parsed: dict, ranked_events: RankedEvents) -> List[FeedIte
                 link=event.link,
                 final_score=final_score,
                 reason=reason,
+                category=_event_category(event, org_category_by_id),
             )
         )
     feed.sort(key=lambda f: f.final_score, reverse=True)
@@ -242,7 +285,9 @@ def _cache_event_metadata(ranked_events: RankedEvents) -> None:
         logger.exception("event metadata cache write failed; continuing without it")
 
 
-def _fallback_feed(ranked_events: RankedEvents, weather: dict) -> FinalFeed:
+def _fallback_feed(
+    ranked_events: RankedEvents, weather: dict, org_category_by_id: dict
+) -> FinalFeed:
     """Used whenever the LLM path is unavailable or fails: rank purely by the
     similarity score Agent 2 already computed, with a generic reason."""
     feed = [
@@ -255,6 +300,7 @@ def _fallback_feed(ranked_events: RankedEvents, weather: dict) -> FinalFeed:
             link=e.link,
             final_score=e.similarity_score,
             reason="Ranked by similarity to your interests (curator step unavailable).",
+            category=_event_category(e, org_category_by_id),
         )
         for e in ranked_events.events
     ]
@@ -286,6 +332,7 @@ def get_final_feed(
     """
     weather = weather if weather is not None else _load_weather()
     _cache_event_metadata(ranked_events)
+    org_category_by_id = _org_category_lookup(profile)
 
     if not ranked_events.events:
         return FinalFeed(
@@ -295,7 +342,7 @@ def get_final_feed(
     hf_token = hf_token or os.environ.get("HF_TOKEN")
     if not hf_token:
         logger.warning("HF_TOKEN not set; returning similarity-ranked fallback feed")
-        return _fallback_feed(ranked_events, weather)
+        return _fallback_feed(ranked_events, weather, org_category_by_id)
 
     try:
         provider = os.environ.get("HF_PROVIDER", DEFAULT_HF_PROVIDER)
@@ -316,7 +363,7 @@ def get_final_feed(
             raise ValueError("model response contained no text content")
 
         parsed = _extract_json_object(raw_output)
-        feed = _build_feed_items(parsed, ranked_events)
+        feed = _build_feed_items(parsed, ranked_events, org_category_by_id)
         if not feed:
             raise ValueError("model scored no valid events")
 
@@ -331,4 +378,4 @@ def get_final_feed(
 
     except Exception:
         logger.exception("Agent 3 (curator/ranker) failed; returning similarity-ranked fallback feed")
-        return _fallback_feed(ranked_events, weather)
+        return _fallback_feed(ranked_events, weather, org_category_by_id)

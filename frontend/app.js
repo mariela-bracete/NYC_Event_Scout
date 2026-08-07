@@ -1,23 +1,27 @@
-// NYC Event Scout — single-screen, three-section frontend.
-// Section 1 (interests) -> Agent 1. Section 2 (orgs) is an editable roster
-// built from Agent 1's response. Section 3 (search) chains Agent 2 -> Agent 3
-// and renders "Best bets this weekend" + the full ranked grid, each card
-// wired to POST /signals on save/skip.
+// NYC Event Scout — five-screen app (Landing / Step 1 Interests / Step 2
+// Organizations / Step 3 Filters / Results), single page, client-side
+// screen switching only (no new backend routes for navigation).
+// Step 1 -> Agent 1. Step 2 is an editable org roster built from Agent 1's
+// response. Step 3 -> Agent 2 -> Agent 3, rendered on Results as
+// "Best bets this weekend" + the full ranked grid, each card wired to
+// POST /signals on save/skip.
 
 const statusEl = document.getElementById("status");
+
+const themeToggle = document.getElementById("theme-toggle");
+
+const landingCta = document.getElementById("landing-cta");
 
 const categoryTiles = document.querySelectorAll(".tile");
 const rawTextEl = document.getElementById("raw-text");
 const findOrgsBtn = document.getElementById("find-orgs-btn");
 
-const orgsPanel = document.getElementById("orgs-panel");
 const orgChipsEl = document.getElementById("org-chips");
 const addOrgForm = document.getElementById("add-org-form");
 const addOrgName = document.getElementById("add-org-name");
 const addOrgCategory = document.getElementById("add-org-category");
+const orgsContinueBtn = document.getElementById("orgs-continue-btn");
 
-const divider2 = document.getElementById("divider-2");
-const searchPanel = document.getElementById("search-panel");
 const filterFree = document.getElementById("filter-free");
 const filterWeekend = document.getElementById("filter-weekend");
 const searchBtn = document.getElementById("search-events-btn");
@@ -26,6 +30,32 @@ const bestBetsContainer = document.getElementById("best-bets-container");
 const bestBetsList = document.getElementById("best-bets-list");
 const eventsContainer = document.getElementById("events-container");
 const eventsList = document.getElementById("events-list");
+const agentStatusList = document.getElementById("agent-status-list");
+const startOverBtn = document.getElementById("start-over-btn");
+
+const CATEGORY_LABELS = {
+  arts_culture: "Arts & Culture",
+  parks_outdoors: "Parks & Outdoors",
+  nightlife_bars: "Nightlife & Bars",
+  food_restaurants: "Food & Restaurants",
+  community_nonprofits: "Community & Nonprofits",
+};
+
+// Same glyphs as the step-1 tile icons (viewBox 0 0 20 20), reused on
+// results event cards so a category reads the same way everywhere it's
+// labeled, per the redesign brief.
+const CATEGORY_ICON_SVG = {
+  arts_culture:
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 16h14M4 16V7M8 16V7M12 16V7M16 16V7M3 7l7-4 7 4" /></svg>',
+  parks_outdoors:
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 17c-4-1-7-4-7-9 0-2 1-3 2-3 6 0 11 4 11 9 0 1-.5 2-1 2M10 17V7" /></svg>',
+  nightlife_bars:
+    '<svg viewBox="0 0 20 20" fill="currentColor" stroke="none" aria-hidden="true"><path d="M13 4a7 7 0 100 12 8 8 0 010-12z" /></svg>',
+  food_restaurants:
+    '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v6M10 3v6M13 3v6M7 9c0 1.5 1.3 2 3 2s3-.5 3-2M10 11v6" /></svg>',
+  community_nonprofits:
+    '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="6" r="2.2" fill="currentColor" stroke="none" /><circle cx="13" cy="6" r="2.2" fill="currentColor" stroke="none" /><path d="M2.5 17c0-3 2-5 4.5-5s4.5 2 4.5 5M8.5 17c0-3 2-5 4.5-5s4.5 2 4.5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>',
+};
 
 // --- state ---
 let profile = null; // PreferenceProfile from Agent 1; profile.orgs is mutated as chips are toggled/added
@@ -68,7 +98,77 @@ function randomId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-// --- Section 1: category tiles (toggle, no backend call) ---
+// --- theme toggle (persisted in localStorage; initial value already set
+// on <html data-theme> by the inline head script, before first paint) ---
+
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  themeToggle.setAttribute("aria-pressed", String(theme === "dark"));
+}
+
+applyTheme(currentTheme());
+
+themeToggle.addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  applyTheme(next);
+  localStorage.setItem("theme", next);
+});
+
+// --- screen navigation ---
+
+const SCREEN_IDS = ["landing", "step1", "step2", "step3", "results"];
+
+function showScreen(id) {
+  for (const screenId of SCREEN_IDS) {
+    document.getElementById(`screen-${screenId}`).classList.toggle("visible", screenId === id);
+  }
+  // Move focus to the new screen's heading so keyboard/screen-reader users
+  // aren't left focused on a now-hidden element.
+  const heading = document.getElementById(`${id}-heading`);
+  if (heading) heading.focus();
+}
+
+function updateStepNav(activeStep) {
+  document.querySelectorAll(".step-nav").forEach((nav) => {
+    nav.querySelectorAll(".step-nav-item").forEach((item) => {
+      const step = Number(item.dataset.step);
+      item.dataset.state = step < activeStep ? "done" : step === activeStep ? "active" : "upcoming";
+    });
+  });
+}
+
+function setAgentStatus(agent, state) {
+  const item = agentStatusList.querySelector(`.agent-status-item[data-agent="${agent}"]`);
+  if (item) item.dataset.state = state;
+}
+
+function resetAgentStatus() {
+  agentStatusList.querySelectorAll(".agent-status-item").forEach((item) => {
+    item.dataset.state = "pending";
+  });
+}
+
+landingCta.addEventListener("click", () => {
+  updateStepNav(1);
+  showScreen("step1");
+});
+
+startOverBtn.addEventListener("click", () => {
+  profile = null;
+  orgActive.clear();
+  latestFinalFeed = null;
+  sentSignals.clear();
+  resetAgentStatus();
+  setStatus("");
+  updateStepNav(1);
+  showScreen("landing");
+});
+
+// --- Step 1: category tiles (toggle, no backend call) ---
 
 categoryTiles.forEach((tile) => {
   tile.addEventListener("click", () => {
@@ -83,18 +183,13 @@ function selectedCategories() {
     .map((t) => t.dataset.category);
 }
 
-// --- Section 1 -> Agent 1 ---
+// --- Step 1 -> Agent 1 ---
 
 findOrgsBtn.addEventListener("click", async () => {
   const rawText = rawTextEl.value.trim();
   const categories = selectedCategories();
 
   findOrgsBtn.disabled = true;
-  orgsPanel.hidden = true;
-  divider2.hidden = true;
-  searchPanel.hidden = true;
-  bestBetsContainer.hidden = true;
-  eventsContainer.hidden = true;
   latestFinalFeed = null;
   sentSignals.clear();
 
@@ -113,10 +208,9 @@ findOrgsBtn.addEventListener("click", async () => {
     for (const org of profile.orgs) orgActive.set(org.org_id, true);
     renderOrgChips();
 
-    orgsPanel.hidden = false;
-    divider2.hidden = false;
-    searchPanel.hidden = false;
     setStatus("");
+    updateStepNav(2);
+    showScreen("step2");
   } catch (err) {
     console.error(err);
     setStatus(`Something went wrong: ${err.message}`, true);
@@ -125,7 +219,7 @@ findOrgsBtn.addEventListener("click", async () => {
   }
 });
 
-// --- Section 2: org chips + inline add form ---
+// --- Step 2: org chips + inline add form ---
 
 function renderOrgChips() {
   orgChipsEl.innerHTML = "";
@@ -173,7 +267,12 @@ addOrgForm.addEventListener("submit", (event) => {
   addOrgName.focus();
 });
 
-// --- Section 3 -> Agent 2 -> Agent 3 ---
+orgsContinueBtn.addEventListener("click", () => {
+  updateStepNav(3);
+  showScreen("step3");
+});
+
+// --- Step 3 -> Agent 2 -> Agent 3 ---
 
 searchBtn.addEventListener("click", async () => {
   if (!profile) return;
@@ -184,10 +283,17 @@ searchBtn.addEventListener("click", async () => {
   const searchProfile = { ...profile, orgs: activeOrgs };
 
   searchBtn.disabled = true;
-  bestBetsContainer.hidden = true;
-  eventsContainer.hidden = true;
   latestFinalFeed = null;
   sentSignals.clear();
+  bestBetsContainer.hidden = true;
+  eventsContainer.hidden = true;
+
+  // Profiler already ran in Step 1 — show Results immediately with live
+  // status (not a faked "active" state after the fact) while Agent 2/3 run.
+  resetAgentStatus();
+  setAgentStatus("profiler", "done");
+  setAgentStatus("retriever", "active");
+  showScreen("results");
 
   try {
     setStatus("Agent 2 is searching for live events (this can take a minute for several orgs)...");
@@ -200,6 +306,8 @@ searchBtn.addEventListener("click", async () => {
     if (!eventsRes.ok) throw new Error(`Event retriever failed (${eventsRes.status})`);
     const rankedEvents = await eventsRes.json();
 
+    setAgentStatus("retriever", "done");
+    setAgentStatus("curator", "active");
     setStatus("Agent 3 is curating your feed and checking the weekend forecast...");
 
     const feedRes = await fetch("/agents/curator-ranker", {
@@ -210,6 +318,7 @@ searchBtn.addEventListener("click", async () => {
     if (!feedRes.ok) throw new Error(`Curator/ranker failed (${feedRes.status})`);
     const finalFeed = await feedRes.json();
 
+    setAgentStatus("curator", "done");
     latestFinalFeed = finalFeed;
     renderResults();
     setStatus("");
@@ -298,13 +407,18 @@ function buildEventCard(item, userId, highlight) {
   const li = document.createElement("li");
   li.className = "event-card" + (highlight ? " highlight" : "");
   li.dataset.eventId = item.event_id;
+  li.dataset.category = item.category;
 
   const sent = sentSignals.get(item.event_id);
   if (sent) li.classList.add(sent === "accept" ? "saved" : "skipped");
 
+  const icon = CATEGORY_ICON_SVG[item.category] || "";
+  const label = CATEGORY_LABELS[item.category] || item.category;
+
   li.innerHTML = `
+    <span class="category-badge">${icon}${escapeHtml(label)}</span>
     <a href="${escapeAttr(item.link)}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
-    <div class="event-meta">${formatDate(item.date)} &middot; ${escapeHtml(item.location)} &middot; ${escapeHtml(String(item.price))}</div>
+    <div class="event-meta"><span class="meta-mono">${formatDate(item.date)}</span> &middot; <span>${escapeHtml(item.location)}</span> &middot; <span class="meta-mono">${escapeHtml(String(item.price))}</span></div>
     <p class="event-reason">${escapeHtml(item.reason)}</p>
     <div class="event-actions">
       <button type="button" class="thumb thumb-up" data-action="accept" ${sent ? "disabled" : ""}>👍 Save</button>
